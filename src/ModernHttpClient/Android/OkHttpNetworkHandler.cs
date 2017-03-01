@@ -12,6 +12,7 @@ using Java.IO;
 using System.Security.Cryptography.X509Certificates;
 using System.Globalization;
 using Android.OS;
+using System.Security.Cryptography;
 
 namespace ModernHttpClient
 {
@@ -32,11 +33,28 @@ namespace ModernHttpClient
 
         public NativeMessageHandler() : this(false, false) {}
 
-        public NativeMessageHandler(bool throwOnCaptiveNetwork, bool customSSLVerification, NativeCookieHandler cookieHandler = null)
+        public NativeMessageHandler(bool throwOnCaptiveNetwork, bool customSSLVerification, NativeCookieHandler cookieHandler = null, List<KeyValuePair<string, X509Certificate2>> certificates = null)
         {
             this.throwOnCaptiveNetwork = throwOnCaptiveNetwork;
 
             if (customSSLVerification) client.SetHostnameVerifier(new HostnameVerifier());
+
+            if (certificates != null)
+            {
+                var sha1 = SHA1.Create();
+                var certificatePinner = new CertificatePinner.Builder();
+
+                foreach (var cert in certificates)
+                {
+                    var javaCertificate = Javax.Security.Cert.X509Certificate.GetInstance(cert.Value.RawData);
+                    var certPublicKey = Convert.ToBase64String(sha1.ComputeHash(javaCertificate.PublicKey.GetEncoded()));
+
+                    certificatePinner.Add(new Uri(cert.Key).Host, $"sha1/{certPublicKey}");
+                }
+
+                client.SetCertificatePinner(certificatePinner.Build());
+            }
+
             noCacheCacheControl = (new CacheControl.Builder()).NoCache().Build();
         }
 
@@ -83,11 +101,13 @@ namespace ModernHttpClient
             var url = new Java.Net.URL(java_uri);
 
             var body = default(RequestBody);
-            if (request.Content != null) {
+            if (request.Content != null)
+            {
                 var bytes = await request.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
 
                 var contentType = "text/plain";
-                if (request.Content.Headers.ContentType != null) {
+                if (request.Content.Headers.ContentType != null)
+                {
                     contentType = String.Join(" ", request.Content.Headers.GetValues("Content-Type"));
                 }
                 body = RequestBody.Create(MediaType.Parse(contentType), bytes);
@@ -97,7 +117,8 @@ namespace ModernHttpClient
                 .Method(request.Method.Method.ToUpperInvariant(), body)
                 .Url(url);
 
-            if (DisableCaching) {
+            if (DisableCaching)
+            {
                 builder.CacheControl(noCacheCacheControl);
             }
 
@@ -120,8 +141,10 @@ namespace ModernHttpClient
             var newReq = resp.Request();
             var newUri = newReq == null ? null : newReq.Uri();
             request.RequestUri = new Uri(newUri.ToString());
-            if (throwOnCaptiveNetwork && newUri != null) {
-                if (url.Host != newUri.Host) {
+            if (throwOnCaptiveNetwork && newUri != null)
+            {
+                if (url.Host != newUri.Host)
+                {
                     throw new CaptiveNetworkException(new Uri(java_uri), new Uri(newUri.ToString()));
                 }
             }
@@ -133,16 +156,20 @@ namespace ModernHttpClient
             var ret = new HttpResponseMessage((HttpStatusCode)resp.Code());
             ret.RequestMessage = request;
             ret.ReasonPhrase = resp.Message();
-            if (respBody != null) {
+            if (respBody != null)
+            {
                 var content = new ProgressStreamContent(respBody.ByteStream(), CancellationToken.None);
                 content.Progress = getAndRemoveCallbackFromRegister(request);
                 ret.Content = content;
-            } else {
+            }
+            else
+            {
                 ret.Content = new ByteArrayContent(new byte[0]);
             }
 
             var respHeaders = resp.Headers();
-            foreach (var k in respHeaders.Names()) {
+            foreach (var k in respHeaders.Names())
+            {
                 ret.Headers.TryAddWithoutValidation(k, respHeaders.Get(k));
                 ret.Content.Headers.TryAddWithoutValidation(k, respHeaders.Get(k));
             }
@@ -175,7 +202,7 @@ namespace ModernHttpClient
                 {
                     tcs.TrySetException(new OperationCanceledException());
                 } else {
-                    tcs.TrySetException(new WebException(p1.Message));
+                    tcs.TrySetException(new WebException(p1.Message, WebExceptionStatus.ConnectFailure));
                 }
             }
 
@@ -211,6 +238,7 @@ namespace ModernHttpClient
             // Convert java certificates to .NET certificates and build cert chain from root certificate
             var certificates = session.GetPeerCertificateChain();
             var chain = new X509Chain();
+
             X509Certificate2 root = null;
             var errors = System.Net.Security.SslPolicyErrors.None;
 
